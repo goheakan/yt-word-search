@@ -1,0 +1,22 @@
+# Environnement et caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Données locales (index, journaux) — jamais versionnées
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Fichiers de travail locaux
+opencode_session.sh
+prompt.txt
+
+# Divers OS
+.DS_Store
+Thumbs.db
