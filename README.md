@@ -96,13 +96,29 @@ Sur macOS : `~/Library/Application Support/yt-word-search/`.
 > L'ancien nommage (`yt-search`) est migré automatiquement au premier lancement :
 > le dossier de données et le fichier de configuration sont renommés s'ils existent encore.
 
-## Confidentialité
+## Confidentialité et sécurité
 
 - aucune donnée ne quitte la machine, sauf les requêtes vers YouTube déclenchées par une
   indexation ;
 - aucune télémétrie, aucun compte, aucune vérification réseau au démarrage ;
-- les cookies d'un navigateur, s'ils sont utilisés (`--cookies-from-browser`), sont lus à la
-  volée et jamais écrits dans la base ni dans les journaux.
+- index dans un dossier `0700` et une base `0600`, redressés à chaque ouverture (un `umask`
+  permissif ne peut pas les affaiblir) — `yts doctor` et `yts status` affichent les droits
+  effectifs ;
+- les cookies d'un navigateur, s'ils sont utilisés (`--cookies-from-browser firefox`), sont
+  transmis à `yt-dlp` à la volée et jamais copiés, journalisés ni stockés ;
+- entrées non fiables : les séquences de contrôle ANSI/OSC des titres et sous-titres sont
+  neutralisées avant affichage, les URL de sous-titres sont limitées à une liste blanche
+  d'hôtes en HTTPS (réponse bornée à 8 Mio), et les exports CSV échappent les formules de
+  tableur ;
+- politique de sécurité, périmètre et signalement : [SECURITY.md](SECURITY.md).
+
+Vérifications en une commande :
+
+```bash
+yts doctor                          # droits, intégrité SQLite et FTS5
+stat -c '%a %n' ~/.local/share/yt-word-search{,/index.db}   # 700 puis 600
+```
+
 
 ## Limites connues
 

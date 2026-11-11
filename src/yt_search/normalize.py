@@ -12,6 +12,23 @@ import unicodedata
 
 TOKEN_RE = re.compile(r"[0-9a-z]+")
 
+#: Caracteres de controle (hors \x00/\x01, marqueurs internes de surlignage,
+#: et hors \t/\n qui sont traites a part).
+_CONTROL_RE = re.compile(r"[\x02-\x08\x0b-\x1f\x7f-\x9f]")
+_SPACE_RE = re.compile(r"[\t\n\r]+")
+
+
+def sanitize(text: str) -> str:
+    """Neutralise les sequences de controle d'un texte non fiable.
+
+    Les titres et sous-titres viennent de YouTube : sans ce filtre, une
+    sequence ANSI/OSC (`\\x1b]0;...`, `\\x1b]52;...`) pourrait changer le titre
+    de la fenetre, ecrire dans le presse-papier ou effacer l'ecran de
+    l'utilisateur au moment de l'affichage.
+    """
+    return _SPACE_RE.sub(" ", _CONTROL_RE.sub("", text or ""))
+
+
 
 def _fold_char(ch: str) -> str:
     """Replie un caractere : minuscule, decomposition NFD, sans diacritiques."""

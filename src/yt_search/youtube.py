@@ -16,6 +16,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .models import Caption
 
@@ -25,6 +26,23 @@ UA = (
 )
 
 HANDLE_RE = re.compile(r"^@?[\w.\-]{3,}$")
+
+#: Un sous-titre ne depasse jamais quelques centaines de Ko ; au-dela, on
+#: considere la reponse comme hostile (memoire, disque) et on abandonne.
+MAX_CAPTION_BYTES = 8 * 1024 * 1024
+
+#: Hotes autorises pour le telechargement direct d'un sous-titre (timedtext).
+#: Sans liste blanche, une URL fabriquee dans les metadonnees pourrait viser
+#: le reseau local (SSRF).
+CAPTION_HOSTS = (
+    "youtube.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "googleusercontent.com",
+)
+
+#: Un nom de navigateur ne doit pas pouvoir ressembler a une option yt-dlp.
+BROWSER_RE = re.compile(r"^[A-Za-z0-9_.+:/-]{1,80}$")
 
 
 class YtError(RuntimeError):
@@ -84,6 +102,41 @@ def _json(proc: subprocess.CompletedProcess[str]) -> dict:
         raise YtError(f"reponse yt-dlp illisible ({exc})") from exc
 
 
+def safe_url(url: str) -> str:
+    """Refuse tout ce qui pourrait etre lu comme une option ou un autre schema."""
+    url = (url or "").strip()
+    if not url:
+        raise YtError("URL vide")
+    if url.startswith("-"):
+        raise YtError("URL refusee : commence par un tiret (injection d'argument)")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise YtError(f"URL refusee : schema {parts.scheme or 'absent'}")
+    if parts.hostname is None:
+        raise YtError("URL refusee : hote absent")
+    return url
+
+
+def caption_url(url: str) -> str:
+    """URL de sous-titre : https obligatoire et hote de la liste blanche."""
+    url = safe_url(url)
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        raise YtError("sous-titre servi en clair (http) : refuse")
+    host = (parts.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in CAPTION_HOSTS):
+        raise YtError(f"hote de sous-titre inattendu : {host}")
+    return url
+
+
+def _cookie_args(browser: str | None) -> list[str]:
+    if not browser:
+        return []
+    if not BROWSER_RE.match(browser):
+        raise YtError(f"nom de navigateur invalide : {browser!r}")
+    return ["--cookies-from-browser", browser]
+
+
 def as_url(target: str) -> str:
     """Accepte @handle, UC..., une URL de chaine, de playlist ou de video."""
     target = target.strip()
@@ -107,9 +160,19 @@ def _channel_url(url: str) -> str:
     return base + "/videos"
 
 
-def list_videos(url: str, timeout: int) -> tuple[dict, list[dict]]:
+def list_videos(
+    url: str, timeout: int, cookies: str | None = None
+) -> tuple[dict, list[dict]]:
     """Liste les videos d'une chaine/playlist. Retourne (entete, entrees)."""
-    args = ["--flat-playlist", "-J", "--ignore-errors", "--no-warnings", _channel_url(url)]
+    args = [
+        "--flat-playlist",
+        "-J",
+        "--ignore-errors",
+        "--no-warnings",
+        *_cookie_args(cookies),
+        "--",
+        safe_url(_channel_url(url)),
+    ]
     data = _json(_run(args, timeout))
     if data.get("_type") == "video":
         return data, [data]
@@ -127,9 +190,10 @@ def list_videos(url: str, timeout: int) -> tuple[dict, list[dict]]:
     return data, clean
 
 
-def probe(url: str, timeout: int) -> dict:
+def probe(url: str, timeout: int, cookies: str | None = None) -> dict:
     """Metadonnees completes d'une video (sous-titres inclus)."""
-    proc = _run(["-J", "--skip-download", "--no-warnings", url], timeout)
+    args = ["-J", "--skip-download", "--no-warnings", *_cookie_args(cookies), "--", safe_url(url)]
+    proc = _run(args, timeout)
     return _json(proc)
 
 
@@ -179,26 +243,37 @@ def pick_caption(meta: dict, langs: tuple[str, ...]) -> Caption | None:
 
 
 def fetch_vtt(url: str, timeout: int = 30) -> str:
-    """Telecharge un sous-titre en WebVTT depuis l'URL timedtext."""
-    if "fmt=" in url:
-        target = re.sub(r"fmt=[^&]*", "fmt=vtt", url)
+    """Telecharge un sous-titre en WebVTT depuis l'URL timedtext.
+
+    L'URL vient des metadonnees de la video : elle est validee (https, hote de
+    la liste blanche) et la reponse est bornee en taille avant lecture.
+    """
+    target = caption_url(url)
+    if "fmt=" in target:
+        target = re.sub(r"fmt=[^&]*", "fmt=vtt", target)
     else:
-        target = url + ("&" if "?" in url else "?") + "fmt=vtt"
+        target = target + ("&" if "?" in target else "?") + "fmt=vtt"
     req = urllib.request.Request(target, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+            # une redirection ne doit pas sortir de la liste blanche
+            caption_url(resp.geturl())
+            raw = resp.read(MAX_CAPTION_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise YtError(f"HTTP {exc.code} sur les sous-titres") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise YtError(f"reseau indisponible ({exc})") from exc
+    if len(raw) > MAX_CAPTION_BYTES:
+        raise YtError("sous-titre anormalement volumineux : abandon")
     text = raw.decode("utf-8", "replace").lstrip("\ufeff")
     if not text.lstrip().startswith("WEBVTT"):
         raise YtError("reponse timedtext inattendue (pas du WebVTT)")
     return text
 
 
-def download_vtt(video_url: str, caption: Caption, timeout: int) -> str:
+def download_vtt(
+    video_url: str, caption: Caption, timeout: int, cookies: str | None = None
+) -> str:
     """Repli : laisse yt-dlp telecharger et convertir le sous-titre en VTT."""
     with tempfile.TemporaryDirectory(prefix="yts-sub-") as tmp:
         args = [
@@ -213,9 +288,11 @@ def download_vtt(video_url: str, caption: Caption, timeout: int) -> str:
             "vtt",
             "--convert-subs",
             "vtt",
+            *_cookie_args(cookies),
             "-o",
             str(Path(tmp) / "%(id)s.%(ext)s"),
-            video_url,
+            "--",
+            safe_url(video_url),
         ]
         proc = _run(args, timeout)
         files = sorted(Path(tmp).glob("*.vtt"))

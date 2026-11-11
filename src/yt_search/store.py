@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from .config import APP_NAME
 from .models import Channel, Segment, Video
 from .normalize import normalize
 
@@ -84,11 +85,24 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _restrict(path: Path, mode: int) -> None:
+    """Retire les droits des autres utilisateurs (Privacy by Design)."""
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
 class Store:
     def __init__(self, path: Path | str):
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        created = not self.path.parent.exists()
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if created or self.path.parent.name == APP_NAME:
+            _restrict(self.path.parent, 0o700)
         self.conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
+        # avant le mode WAL : les fichiers -wal/-shm heritent des droits du fichier
+        _restrict(self.path, 0o600)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -124,6 +138,16 @@ class Store:
 
     def integrity(self) -> str:
         return str(self.conn.execute("PRAGMA quick_check").fetchone()[0])
+
+    def perms(self) -> tuple[str, str]:
+        """Droits effectifs du dossier et de la base, en octal."""
+        def mode(path: Path) -> str:
+            try:
+                return oct(path.stat().st_mode & 0o777)[2:].rjust(3, "0")
+            except OSError:
+                return "???"
+
+        return mode(self.path.parent), mode(self.path)
 
     def fts_integrity(self) -> bool:
         try:

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from . import youtube
 from .config import Config
 from .models import Channel, FetchResult, Segment, Video
+from .normalize import sanitize
 from .store import Store
 from .vtt import build_segments, parse_vtt
 
@@ -37,7 +38,7 @@ class Counters:
 
 
 def _log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    print(sanitize(message), file=sys.stderr, flush=True)
 
 
 def _iso_date(upload_date: str | None) -> str | None:
@@ -48,7 +49,7 @@ def _iso_date(upload_date: str | None) -> str | None:
 
 def fetch_video(url: str, cfg: Config) -> FetchResult:
     """Recupere les sous-titres d'une video et les decoupe en passages."""
-    meta = youtube.probe(url, cfg.timeout)
+    meta = youtube.probe(url, cfg.timeout, cfg.cookies_from_browser)
     vid = meta.get("id") or url.rstrip("/").rsplit("=", 1)[-1]
     title = meta.get("title") or vid
 
@@ -74,7 +75,7 @@ def fetch_video(url: str, cfg: Config) -> FetchResult:
     try:
         raw = youtube.fetch_vtt(caption.url, timeout=min(30, cfg.timeout))
     except youtube.YtError:
-        raw = youtube.download_vtt(url, caption, cfg.timeout)
+        raw = youtube.download_vtt(url, caption, cfg.timeout, cfg.cookies_from_browser)
 
     cues = parse_vtt(raw)
     pieces = build_segments(
@@ -97,7 +98,7 @@ class Indexer:
     def register(self, target: str) -> tuple[Channel | None, list[str]]:
         """Enregistre la chaine (ou la video) et retourne les IDs concernes."""
         url = youtube.as_url(target)
-        head, entries = youtube.list_videos(url, self.cfg.timeout)
+        head, entries = youtube.list_videos(url, self.cfg.timeout, self.cfg.cookies_from_browser)
 
         channel: Channel | None = None
         channel_id = head.get("channel_id")

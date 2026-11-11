@@ -9,6 +9,7 @@ import sys
 from typing import Iterable, Sequence
 
 from .models import VideoHits
+from .normalize import sanitize
 from .search import MARK_CLOSE, MARK_OPEN
 from .youtube import timestamp_url
 
@@ -16,6 +17,17 @@ RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
 DIM = "\x1b[2m"
 MATCH = "\x1b[1;33m"
+
+#: Un tableur interprete ces prefixes comme une formule : un titre de video
+#: pourrait donc executer du code a l'ouverture du CSV.
+_FORMULA_PREFIX = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: object) -> object:
+    """Neutralise l'injection de formule dans un export CSV/tableur."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIX):
+        return "'" + value
+    return value
 
 
 def clock(ms: int) -> str:
@@ -49,7 +61,7 @@ def _plural(n: int, word: str) -> str:
 def render_table(groups: Sequence[VideoHits], tokens: Sequence[str], *, color: bool = True) -> str:
     total_passages = sum(len(g.passages) for g in groups)
     total_matches = sum(g.matches for g in groups)
-    word = " ".join(tokens)
+    word = sanitize(" ".join(tokens))
     out: list[str] = []
 
     header = (
@@ -60,14 +72,14 @@ def render_table(groups: Sequence[VideoHits], tokens: Sequence[str], *, color: b
     out.append("")
 
     for group in groups:
-        title = _short(group.title, 90)
-        meta = ", ".join(x for x in (group.channel, group.published_at) if x)
+        title = _short(sanitize(group.title), 90)
+        meta = ", ".join(sanitize(x) for x in (group.channel, group.published_at) if x)
         if color:
             out.append(f"{BOLD}{title}{RESET}" + (f"  {DIM}({meta}){RESET}" if meta else ""))
         else:
             out.append(title + (f"  ({meta})" if meta else ""))
         for passage in group.passages:
-            snippet = _marks(_short(passage.snippet, 240), color)
+            snippet = _marks(_short(sanitize(passage.snippet), 240), color)
             stamp = clock(passage.start_ms)
             url = timestamp_url(passage.video_id, passage.start_ms)
             if color:
@@ -124,15 +136,15 @@ def render_csv(groups: Iterable[VideoHits]) -> str:
         for passage in group.passages:
             writer.writerow(
                 [
-                    passage.video_id,
-                    passage.title,
-                    passage.channel or "",
-                    group.published_at or "",
+                    csv_safe(passage.video_id),
+                    csv_safe(sanitize(passage.title)),
+                    csv_safe(sanitize(passage.channel or "")),
+                    csv_safe(group.published_at or ""),
                     clock(passage.start_ms),
                     passage.start_ms,
                     timestamp_url(passage.video_id, passage.start_ms),
                     passage.matches,
-                    passage.snippet.replace(MARK_OPEN, "").replace(MARK_CLOSE, ""),
+                    csv_safe(sanitize(passage.snippet.replace(MARK_OPEN, "").replace(MARK_CLOSE, ""))),
                 ]
             )
     return out.getvalue()

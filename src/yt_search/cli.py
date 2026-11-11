@@ -11,8 +11,8 @@ from pathlib import Path
 from . import __version__, youtube
 from .config import Config, default_config_path, load_config
 from .indexer import Indexer
-from .normalize import tokenize
-from .output import render_csv, render_jsonl, render_table, supports_color
+from .normalize import sanitize, tokenize
+from .output import csv_safe, render_csv, render_jsonl, render_table, supports_color
 from .search import MODES, QueryError, search as run_search
 from .store import Store
 
@@ -139,11 +139,11 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                 store,
                 tokens,
                 mode=args.mode,
-                near=args.near,
+                near=max(1, args.near),
                 prefix=args.prefix,
                 context=args.context or cfg.context,
-                per_video=args.per_video,
-                limit=args.limit,
+                per_video=max(1, args.per_video),
+                limit=max(1, args.limit),
                 channel=args.channel,
             )
         except QueryError as exc:
@@ -157,12 +157,12 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
         elif args.csv:
             sys.stdout.write(render_csv(groups))
         elif args.count:
-            world = " ".join(tokens)
+            world = sanitize(" ".join(tokens))
             total = sum(g.matches for g in groups)
             print(f"{world} — {total} occurrence" + ("s" if total > 1 else ""))
             print("")
             for group in sorted(groups, key=lambda g: g.matches, reverse=True):
-                print(f"{group.matches:>5}  {group.title}")
+                print(f"{group.matches:>5}  {sanitize(group.title)}")
         else:
             color = cfg.color and supports_color()
             sys.stdout.write(render_table(groups, tokens, color=color))
@@ -197,12 +197,16 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         )
         print(f"Passages  {stats['segments']}")
         print(f"Texte     {stats['chars'] / 1_000_000:.2f} M caracteres")
+        folder, base = store.perms()
+        print(f"Droits    dossier {folder}, base {base}" + ("" if folder == "700" and base == "600" else " (devraient etre 700/600)"))
         errors = store.errors(5)
         if errors:
             print("")
             print("Derniers echecs :")
             for row in errors:
-                print(f"  {row['id']}  {row['title'][:60]}  —  {row['error']}")
+                print(
+                    f"  {row['id']}  {sanitize(row['title'])[:60]}  —  {sanitize(row['error'] or '')}"
+                )
     finally:
         store.close()
     return EXIT_OK
@@ -211,22 +215,52 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 def _cmd_export(args: argparse.Namespace, cfg: Config) -> int:
     store = Store(cfg.db_path)
     try:
-        rows = list(store.export_rows())
+        if args.format == "csv":
+            import csv
+
+            writer = csv.writer(sys.stdout, lineterminator="\n")
+            writer.writerow(
+                ["video_id", "title", "url", "published_at", "source", "lang", "start_ms", "text"]
+            )
+            empty = True
+            for row in store.export_rows():
+                empty = False
+                writer.writerow(
+                    [
+                        csv_safe(row["id"]),
+                        csv_safe(sanitize(row["title"])),
+                        row["url"],
+                        row["published_at"] or "",
+                        row["source"] or "",
+                        row["lang"] or "",
+                        row["start_ms"],
+                        csv_safe(sanitize(row["text"])),
+                    ]
+                )
+        else:
+            empty = True
+            for row in store.export_rows():
+                empty = False
+                print(
+                    json.dumps(
+                        {
+                            "video_id": row["id"],
+                            "title": sanitize(row["title"]),
+                            "url": row["url"],
+                            "published_at": row["published_at"],
+                            "source": row["source"],
+                            "lang": row["lang"],
+                            "start_ms": row["start_ms"],
+                            "text": row["text"],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
     finally:
         store.close()
-    if not rows:
+    if empty:
         print("index vide", file=sys.stderr)
         return EXIT_EMPTY
-    if args.format == "csv":
-        import csv
-
-        writer = csv.writer(sys.stdout, lineterminator="\n")
-        writer.writerow(["video_id", "title", "url", "published_at", "source", "lang", "start_ms", "text"])
-        for row in rows:
-            writer.writerow(list(row))
-    else:
-        for row in rows:
-            print(json.dumps(dict(row), ensure_ascii=False))
     return EXIT_OK
 
 
@@ -236,7 +270,7 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     binary = youtube.binary()
     version = youtube.version()
     if version:
-        print(f"yt-dlp        {version}  ({binary})")
+        print(f"yt-dlp        {sanitize(version)}  ({binary})")
     else:
         print(f"yt-dlp        INTROUVABLE ({binary}) — installe-le : pacman -S yt-dlp")
         ok = False
@@ -254,9 +288,17 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         ok = False
 
     print(f"langues       {','.join(cfg.langs)}")
+    cfg_path = Path(getattr(args, "config_path", None) or default_config_path())
+    if cfg_path.is_file():
+        mode = oct(cfg_path.stat().st_mode & 0o777)[2:].rjust(3, "0")
+        note = "" if mode in ("600", "400") else "  (conseille : chmod 600)"
+        print(f"droits config {mode}{note}")
     if cfg.db_path.exists():
         store = Store(cfg.db_path)
         try:
+            folder, base = store.perms()
+            note = "" if folder == "700" and base == "600" else "  (conseille : 700/600)"
+            print(f"droits base   dossier {folder}, fichier {base}{note}")
             print(f"integrite     {store.integrity()}")
             fts_ok = store.fts_integrity()
             print(f"index FTS     {'ok' if fts_ok else 'CORROMPU — relancer : yts export > /dev/null'}")
@@ -295,6 +337,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrompu", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        # lecteur parti (`| head`) : ce n'est pas une erreur, on coupe proprement
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return EXIT_OK
     except youtube.YtError as exc:
         print(f"erreur : {exc}", file=sys.stderr)
         return EXIT_ERROR

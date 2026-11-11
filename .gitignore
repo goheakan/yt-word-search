@@ -12,10 +12,14 @@ build/
 *.db-wal
 *.db-shm
 *.log
+*.jsonl
+*.har
+cookies.txt
 
 # Fichiers de travail locaux
 opencode_session.sh
 prompt.txt
+export/
 
 # Divers OS
 .DS_Store
